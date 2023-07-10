@@ -8,12 +8,12 @@ target triple = "x86_64-unknown-linux-gnu"
 
 ; COMMON-LABEL: @llvm.compiler.used = appending global
 ; SVML-SAME:        [6 x ptr] [
-; SVML-SAME:          ptr @__svml_sin2,
-; SVML-SAME:          ptr @__svml_sin4,
-; SVML-SAME:          ptr @__svml_sin8,
-; SVML-SAME:          ptr @__svml_log10f4,
-; SVML-SAME:          ptr @__svml_log10f8,
-; SVML-SAME:          ptr @__svml_log10f16
+; SVML-SAME:          ptr @__svml_sin2_ha,
+; SVML-SAME:          ptr @__svml_sin4_ha,
+; SVML-SAME:          ptr @__svml_sin8_ha,
+; SVML-SAME:          ptr @__svml_log10f4_ha,
+; SVML-SAME:          ptr @__svml_log10f8_ha,
+; SVML-SAME:          ptr @__svml_log10f16_ha
 ; MASSV-SAME:       [2 x ptr] [
 ; MASSV-SAME:         ptr @__sind2,
 ; MASSV-SAME:         ptr @__log10f4
@@ -55,9 +55,9 @@ declare float @llvm.log10.f32(float) #0
 attributes #0 = { nounwind readnone }
 
 ; SVML:      attributes #[[SIN]] = { "vector-function-abi-variant"=
-; SVML-SAME:   "_ZGV_LLVM_N2v_sin(__svml_sin2),
-; SVML-SAME:   _ZGV_LLVM_N4v_sin(__svml_sin4),
-; SVML-SAME:   _ZGV_LLVM_N8v_sin(__svml_sin8)" }
+; SVML-SAME:   "_ZGV_LLVM_N2v_sin(__svml_sin2_ha),
+; SVML-SAME:   _ZGV_LLVM_N4v_sin(__svml_sin4_ha),
+; SVML-SAME:   _ZGV_LLVM_N8v_sin(__svml_sin8_ha)" }
 
 ; MASSV:      attributes #[[SIN]] = { "vector-function-abi-variant"=
 ; MASSV-SAME:   "_ZGV_LLVM_N2v_sin(__sind2)" }
