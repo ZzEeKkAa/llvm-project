@@ -24,6 +24,12 @@ tablegen("X86GenFastISel") {
   td_file = "X86.td"
 }
 
+# tablegen("X86GenSVML") {
+#   visibility = [ ":LLVMX86CodeGen" ]
+#   args = [ "-gen-svml" ]
+#   td_file = "X86.td"
+# }
+
 tablegen("X86GenFoldTables") {
   visibility = [ ":LLVMX86CodeGen" ]
   args = [

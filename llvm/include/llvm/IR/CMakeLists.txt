@@ -24,6 +24,7 @@ tablegen(LLVM IntrinsicsXCore.h -gen-intrinsic-enums -intrinsic-prefix=xcore)
 tablegen(LLVM IntrinsicsVE.h -gen-intrinsic-enums -intrinsic-prefix=ve)
 add_public_tablegen_target(intrinsics_gen)
 
+#TODO: try to use llvm-tblgen, instead of llvm-min-tblgen
 set(LLVM_TARGET_DEFINITIONS SVML.td)
 tablegen(LLVM SVML.inc -gen-svml)
 add_public_tablegen_target(svml_gen)

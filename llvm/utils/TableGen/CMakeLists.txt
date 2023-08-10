@@ -8,6 +8,7 @@ add_llvm_library(LLVMTableGenCommon STATIC OBJECT EXCLUDE_FROM_ALL
   RISCVTargetDefEmitter.cpp
   SDNodeProperties.cpp
   VTEmitter.cpp
+  SVMLEmitter.cpp
   PARTIAL_SOURCES_INTENDED
 
   LINK_COMPONENTS
@@ -76,7 +77,6 @@ add_tablegen(llvm-tblgen LLVM
   SearchableTableEmitter.cpp
   SubtargetEmitter.cpp
   SubtargetFeatureInfo.cpp
-  SVMLEmitter.cpp
   TableGen.cpp
   Types.cpp
   VarLenCodeEmitterGen.cpp

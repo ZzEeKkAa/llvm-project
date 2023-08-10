@@ -181,7 +181,7 @@ public:
   std::string getVectorizedFunction(StringRef F, const ElementCount &VF,
                                   bool Masked, bool IsFast) const;
 
-  Optional<CallingConv::ID> getVectorizedFunctionCallingConv(
+  std::optional<CallingConv::ID> getVectorizedFunctionCallingConv(
     StringRef F, const FunctionType &FTy, const DataLayout &DL) const;
 
   /// Set to true iff i32 parameters to library functions should have signext
@@ -363,7 +363,7 @@ public:
     return Impl->getVectorizedFunction(F, VF, Masked, IsFast);
   }
 
-  Optional<CallingConv::ID> getVectorizedFunctionCallingConv(
+  std::optional<CallingConv::ID> getVectorizedFunctionCallingConv(
     StringRef F, const FunctionType &FTy, const DataLayout &DL) const {
     return Impl->getVectorizedFunctionCallingConv(F, FTy, DL);
   }

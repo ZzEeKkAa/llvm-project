@@ -1275,7 +1275,7 @@ static CallingConv::ID getSVMLCallingConv(const DataLayout &DL, const FunctionTy
   return 0; // not reachable
 }
 
-Optional<CallingConv::ID>
+std::optional<CallingConv::ID>
 TargetLibraryInfoImpl::getVectorizedFunctionCallingConv(
     StringRef F, const FunctionType &FTy, const DataLayout &DL) const {
   if (F.startswith("__svml")) {

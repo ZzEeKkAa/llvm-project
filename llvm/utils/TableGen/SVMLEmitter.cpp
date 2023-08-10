@@ -11,7 +11,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "CodeGenTarget.h"
+#include "SVMLEmitter.h"
+// #include "CodeGenTarget.h"
 #include "llvm/Support/Format.h"
 #include "llvm/TableGen/Error.h"
 #include "llvm/TableGen/Record.h"
@@ -25,7 +26,6 @@ using namespace llvm;
 #include "llvm/Support/Debug.h"
 
 namespace {
-
 class SVMLVariantsEmitter {
 
   RecordKeeper &Records;
@@ -105,5 +105,5 @@ void EmitSVMLVariants(RecordKeeper &RK, raw_ostream &OS) {
   SVMLVariantsEmitter(RK).run(OS);
 }
 
-static TableGen::Emitter::Opt X("gen-svml", EmitSVMLVariants,
-                                "Generate SVML variant function names");
+// static TableGen::Emitter::Opt X("gen-svml", EmitSVMLVariants,
+//                                 "Generate SVML variant function names");
