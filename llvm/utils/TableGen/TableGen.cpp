@@ -18,6 +18,7 @@
 #include "llvm/TableGen/Record.h"
 #include "llvm/TableGen/SetTheory.h"
 #include "llvm/TableGen/TableGenBackend.h"
+#include "SVMLEmitter.h"
 #include <cassert>
 #include <string>
 #include <vector>
@@ -73,6 +74,7 @@ TableGen::Emitter::Opt X[] = {
     {"dump-json", EmitJSON, "Dump all records as machine-readable JSON"},
     {"print-enums", PrintEnums, "Print enum values for a class"},
     {"print-sets", PrintSets, "Print expanded sets for testing DAG exprs"},
+    {"gen-svml", EmitSVMLVariants, "Generate SVML variant function names"},
 };
 
 } // namespace

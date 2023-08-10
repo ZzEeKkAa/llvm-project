@@ -11,6 +11,7 @@ tablegen(LLVM X86GenDisassemblerTables.inc -gen-disassembler)
 tablegen(LLVM X86GenEVEX2VEXTables.inc -gen-x86-EVEX2VEX-tables)
 tablegen(LLVM X86GenExegesis.inc -gen-exegesis)
 tablegen(LLVM X86GenFastISel.inc -gen-fast-isel)
+# tablegen(LLVM X86GenSVML.inc -gen-svml)
 tablegen(LLVM X86GenGlobalISel.inc -gen-global-isel)
 tablegen(LLVM X86GenInstrInfo.inc -gen-instr-info
                                   -instr-info-expand-mi-operand-info=0)

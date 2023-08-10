@@ -485,6 +485,10 @@ llvm-tblgen Options
 
   Generate a "fast" instruction selector.
 
+.. option:: -gen-svml
+
+  Generate SVML instructions
+
 .. option:: -gen-global-isel
 
   Generate GlobalISel selector.
