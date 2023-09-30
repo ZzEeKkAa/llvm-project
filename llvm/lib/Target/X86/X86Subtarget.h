@@ -17,6 +17,7 @@
 #include "X86ISelLowering.h"
 #include "X86InstrInfo.h"
 #include "X86SelectionDAGInfo.h"
+#include "llvm/CodeGen/GlobalISel/LegalizerInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/TargetParser/Triple.h"
@@ -263,7 +264,8 @@ public:
   // If there are no 512-bit vectors and we prefer not to use 512-bit registers,
   // disable them in the legalizer.
   bool useAVX512Regs() const {
-    return hasAVX512() && (canExtendTo512DQ() || RequiredVectorWidth > 256);
+    return hasAVX512() && hasEVEX512() &&
+           (canExtendTo512DQ() || RequiredVectorWidth > 256);
   }
 
   bool useLight256BitInstructions() const {
@@ -358,6 +360,9 @@ public:
     case CallingConv::X86_ThisCall:
     case CallingConv::X86_VectorCall:
     case CallingConv::Intel_OCL_BI:
+    case CallingConv::Intel_SVML128:
+    case CallingConv::Intel_SVML256:
+    case CallingConv::Intel_SVML512:
       return isTargetWin64();
     // This convention allows using the Win64 convention on other targets.
     case CallingConv::Win64:

@@ -606,6 +606,9 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(spir_kernel);
   KEYWORD(spir_func);
   KEYWORD(intel_ocl_bicc);
+  KEYWORD(intel_svmlcc128);
+  KEYWORD(intel_svmlcc256);
+  KEYWORD(intel_svmlcc512);
   KEYWORD(x86_64_sysvcc);
   KEYWORD(win64cc);
   KEYWORD(x86_regcallcc);
@@ -825,15 +828,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   TYPEKEYWORD("x86_mmx",   Type::getX86_MMXTy(Context));
   TYPEKEYWORD("x86_amx",   Type::getX86_AMXTy(Context));
   TYPEKEYWORD("token",     Type::getTokenTy(Context));
-
-  if (Keyword == "ptr") {
-    if (Context.supportsTypedPointers()) {
-      Warning("ptr type is only supported in -opaque-pointers mode");
-      return lltok::Error;
-    }
-    TyVal = PointerType::getUnqual(Context);
-    return lltok::Type;
-  }
+  TYPEKEYWORD("ptr",       PointerType::getUnqual(Context));
 
 #undef TYPEKEYWORD
 

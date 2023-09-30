@@ -4219,7 +4219,7 @@ protected:
           Status error;
           StreamString feedback_stream;
           module_sp->LoadScriptingResourceInTarget(target, error,
-                                                   &feedback_stream);
+                                                   feedback_stream);
           if (error.Fail() && error.AsCString())
             result.AppendWarningWithFormat(
                 "unable to load scripting data for module %s - error "
@@ -4942,6 +4942,8 @@ public:
   void
   HandleArgumentCompletion(CompletionRequest &request,
                            OptionElementVector &opt_element_vector) override {
+    if (request.GetCursorIndex())
+      return;
     lldb_private::CommandCompletions::InvokeCommonCompletionCallbacks(
         GetCommandInterpreter(), lldb::eStopHookIDCompletion, request, nullptr);
   }

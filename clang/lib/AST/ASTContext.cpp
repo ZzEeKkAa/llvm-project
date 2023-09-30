@@ -58,6 +58,7 @@
 #include "clang/Basic/Module.h"
 #include "clang/Basic/NoSanitizeList.h"
 #include "clang/Basic/ObjCRuntime.h"
+#include "clang/Basic/ProfileList.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/Specifiers.h"
@@ -6328,8 +6329,8 @@ bool ASTContext::isSameConstraintExpr(const Expr *XCE, const Expr *YCE) const {
     return true;
 
   llvm::FoldingSetNodeID XCEID, YCEID;
-  XCE->Profile(XCEID, *this, /*Canonical=*/true);
-  YCE->Profile(YCEID, *this, /*Canonical=*/true);
+  XCE->Profile(XCEID, *this, /*Canonical=*/true, /*ProfileLambdaExpr=*/true);
+  YCE->Profile(YCEID, *this, /*Canonical=*/true, /*ProfileLambdaExpr=*/true);
   return XCEID == YCEID;
 }
 
@@ -6345,11 +6346,14 @@ bool ASTContext::isSameTypeConstraint(const TypeConstraint *XTC,
   auto *NCY = YTC->getNamedConcept();
   if (!NCX || !NCY || !isSameEntity(NCX, NCY))
     return false;
-  if (XTC->hasExplicitTemplateArgs() != YTC->hasExplicitTemplateArgs())
+  if (XTC->getConceptReference()->hasExplicitTemplateArgs() !=
+      YTC->getConceptReference()->hasExplicitTemplateArgs())
     return false;
-  if (XTC->hasExplicitTemplateArgs())
-    if (XTC->getTemplateArgsAsWritten()->NumTemplateArgs !=
-        YTC->getTemplateArgsAsWritten()->NumTemplateArgs)
+  if (XTC->getConceptReference()->hasExplicitTemplateArgs())
+    if (XTC->getConceptReference()
+            ->getTemplateArgsAsWritten()
+            ->NumTemplateArgs !=
+        YTC->getConceptReference()->getTemplateArgsAsWritten()->NumTemplateArgs)
       return false;
 
   // Compare slowly by profiling.
@@ -6694,13 +6698,8 @@ bool ASTContext::isSameEntity(const NamedDecl *X, const NamedDecl *Y) const {
     // ConceptDecl wouldn't be the same if their constraint expression differs.
     if (const auto *ConceptX = dyn_cast<ConceptDecl>(X)) {
       const auto *ConceptY = cast<ConceptDecl>(Y);
-      const Expr *XCE = ConceptX->getConstraintExpr();
-      const Expr *YCE = ConceptY->getConstraintExpr();
-      assert(XCE && YCE && "ConceptDecl without constraint expression?");
-      llvm::FoldingSetNodeID XID, YID;
-      XCE->Profile(XID, *this, /*Canonical=*/true);
-      YCE->Profile(YID, *this, /*Canonical=*/true);
-      if (XID != YID)
+      if (!isSameConstraintExpr(ConceptX->getConstraintExpr(),
+                                ConceptY->getConstraintExpr()))
         return false;
     }
 
@@ -7891,6 +7890,7 @@ ASTContext::getObjCPropertyImplDeclForPropertyDecl(
 /// kPropertyWeak = 'W'              // 'weak' property
 /// kPropertyStrong = 'P'            // property GC'able
 /// kPropertyNonAtomic = 'N'         // property non-atomic
+/// kPropertyOptional = '?'          // property optional
 /// };
 /// @endcode
 std::string
@@ -7915,6 +7915,9 @@ ASTContext::getObjCEncodingForPropertyDecl(const ObjCPropertyDecl *PD,
   // GCC has some special rules regarding encoding of properties which
   // closely resembles encoding of ivars.
   getObjCEncodingForPropertyType(PD->getType(), S);
+
+  if (PD->isOptional())
+    S += ",?";
 
   if (PD->isReadOnly()) {
     S += ",R";
@@ -9466,7 +9469,7 @@ bool ASTContext::areCompatibleVectorTypes(QualType FirstVec,
 
 /// getSVETypeSize - Return SVE vector or predicate register size.
 static uint64_t getSVETypeSize(ASTContext &Context, const BuiltinType *Ty) {
-  assert(Ty->isVLSTBuiltinType() && "Invalid SVE Type");
+  assert(Ty->isSveVLSBuiltinType() && "Invalid SVE Type");
   if (Ty->getKind() == BuiltinType::SveBool ||
       Ty->getKind() == BuiltinType::SveCount)
     return (Context.getLangOpts().VScaleMin * 128) / Context.getCharWidth();
@@ -9617,9 +9620,8 @@ bool ASTContext::areLaxCompatibleRVVTypes(QualType FirstType,
       const LangOptions::LaxVectorConversionKind LVCKind =
           getLangOpts().getLaxVectorConversions();
 
-      // If __riscv_v_fixed_vlen != N do not allow GNU vector lax conversion.
-      if (VecTy->getVectorKind() == VectorType::GenericVector &&
-          getTypeSize(SecondType) != getRVVTypeSize(*this, BT))
+      // If __riscv_v_fixed_vlen != N do not allow vector lax conversion.
+      if (getTypeSize(SecondType) != getRVVTypeSize(*this, BT))
         return false;
 
       // If -flax-vector-conversions=all is specified, the types are
@@ -11694,6 +11696,14 @@ static GVALinkage basicGVALinkageForFunction(const ASTContext &Context,
   if (FD->isMSExternInline())
     return GVA_StrongODR;
 
+  if (Context.getTargetInfo().getCXXABI().isMicrosoft() &&
+      isa<CXXConstructorDecl>(FD) &&
+      cast<CXXConstructorDecl>(FD)->isInheritingConstructor())
+    // Our approach to inheriting constructors is fundamentally different from
+    // that used by the MS ABI, so keep our inheriting constructor thunks
+    // internal rather than trying to pick an unambiguous mangling for them.
+    return GVA_Internal;
+
   return GVA_DiscardableODR;
 }
 
@@ -12695,7 +12705,6 @@ static QualType getCommonNonSugarTypeNode(ASTContext &Ctx, const Type *X,
 
 #define SUGAR_FREE_TYPE(Class) UNEXPECTED_TYPE(Class, "sugar-free")
     SUGAR_FREE_TYPE(Builtin)
-    SUGAR_FREE_TYPE(Decltype)
     SUGAR_FREE_TYPE(DeducedTemplateSpecialization)
     SUGAR_FREE_TYPE(DependentBitInt)
     SUGAR_FREE_TYPE(Enum)
@@ -12924,6 +12933,15 @@ static QualType getCommonNonSugarTypeNode(ASTContext &Ctx, const Type *X,
         ::getCommonTemplateNameChecked(Ctx, TX->getTemplateName(),
                                        TY->getTemplateName()),
         As, X->getCanonicalTypeInternal());
+  }
+  case Type::Decltype: {
+    const auto *DX = cast<DecltypeType>(X);
+    [[maybe_unused]] const auto *DY = cast<DecltypeType>(Y);
+    assert(DX->isDependentType());
+    assert(DY->isDependentType());
+    assert(Ctx.hasSameExpr(DX->getUnderlyingExpr(), DY->getUnderlyingExpr()));
+    // As Decltype is not uniqued, building a common type would be wasteful.
+    return QualType(DX, 0);
   }
   case Type::DependentName: {
     const auto *NX = cast<DependentNameType>(X),

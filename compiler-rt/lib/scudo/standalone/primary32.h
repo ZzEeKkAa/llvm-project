@@ -307,7 +307,19 @@ public:
     for (uptr I = 0; I < NumClasses; I++) {
       SizeClassInfo *Sci = getSizeClassInfo(I);
       ScopedLock L(Sci->Mutex);
-      getStats(Str, I, Sci, 0);
+      getStats(Str, I, Sci);
+    }
+  }
+
+  void getFragmentationInfo(ScopedString *Str) {
+    Str->append(
+        "Fragmentation Stats: SizeClassAllocator32: page size = %zu bytes\n",
+        getPageSizeCached());
+
+    for (uptr I = 1; I < NumClasses; I++) {
+      SizeClassInfo *Sci = getSizeClassInfo(I);
+      ScopedLock L(Sci->Mutex);
+      getSizeClassFragmentationInfo(Sci, I, Str);
     }
   }
 
@@ -832,26 +844,80 @@ private:
     return true;
   }
 
-  void getStats(ScopedString *Str, uptr ClassId, SizeClassInfo *Sci, uptr Rss)
+  void getStats(ScopedString *Str, uptr ClassId, SizeClassInfo *Sci)
       REQUIRES(Sci->Mutex) {
     if (Sci->AllocatedUser == 0)
       return;
+    const uptr BlockSize = getSizeByClassId(ClassId);
     const uptr InUse =
         Sci->FreeListInfo.PoppedBlocks - Sci->FreeListInfo.PushedBlocks;
-    const uptr AvailableChunks = Sci->AllocatedUser / getSizeByClassId(ClassId);
+    const uptr BytesInFreeList = Sci->AllocatedUser - InUse * BlockSize;
+    uptr PushedBytesDelta = 0;
+    if (BytesInFreeList >= Sci->ReleaseInfo.BytesInFreeListAtLastCheckpoint) {
+      PushedBytesDelta =
+          BytesInFreeList - Sci->ReleaseInfo.BytesInFreeListAtLastCheckpoint;
+    }
+    const uptr AvailableChunks = Sci->AllocatedUser / BlockSize;
     Str->append("  %02zu (%6zu): mapped: %6zuK popped: %7zu pushed: %7zu "
-                "inuse: %6zu avail: %6zu rss: %6zuK releases: %6zu\n",
+                "inuse: %6zu avail: %6zu releases: %6zu last released: %6zuK "
+                "latest pushed bytes: %6zuK\n",
                 ClassId, getSizeByClassId(ClassId), Sci->AllocatedUser >> 10,
                 Sci->FreeListInfo.PoppedBlocks, Sci->FreeListInfo.PushedBlocks,
-                InUse, AvailableChunks, Rss >> 10,
-                Sci->ReleaseInfo.RangesReleased);
+                InUse, AvailableChunks, Sci->ReleaseInfo.RangesReleased,
+                Sci->ReleaseInfo.LastReleasedBytes >> 10,
+                PushedBytesDelta >> 10);
+  }
+
+  void getSizeClassFragmentationInfo(SizeClassInfo *Sci, uptr ClassId,
+                                     ScopedString *Str) REQUIRES(Sci->Mutex) {
+    const uptr BlockSize = getSizeByClassId(ClassId);
+    const uptr First = Sci->MinRegionIndex;
+    const uptr Last = Sci->MaxRegionIndex;
+    const uptr Base = First * RegionSize;
+    const uptr NumberOfRegions = Last - First + 1U;
+    auto SkipRegion = [this, First, ClassId](uptr RegionIndex) {
+      ScopedLock L(ByteMapMutex);
+      return (PossibleRegions[First + RegionIndex] - 1U) != ClassId;
+    };
+
+    FragmentationRecorder Recorder;
+    if (!Sci->FreeListInfo.BlockList.empty()) {
+      PageReleaseContext Context =
+          markFreeBlocks(Sci, ClassId, BlockSize, Base, NumberOfRegions,
+                         ReleaseToOS::ForceAll);
+      releaseFreeMemoryToOS(Context, Recorder, SkipRegion);
+    }
+
+    const uptr PageSize = getPageSizeCached();
+    const uptr TotalBlocks = Sci->AllocatedUser / BlockSize;
+    const uptr InUseBlocks =
+        Sci->FreeListInfo.PoppedBlocks - Sci->FreeListInfo.PushedBlocks;
+    uptr AllocatedPagesCount = 0;
+    if (TotalBlocks != 0U) {
+      for (uptr I = 0; I < NumberOfRegions; ++I) {
+        if (SkipRegion(I))
+          continue;
+        AllocatedPagesCount += RegionSize / PageSize;
+      }
+
+      DCHECK_NE(AllocatedPagesCount, 0U);
+    }
+
+    DCHECK_GE(AllocatedPagesCount, Recorder.getReleasedPagesCount());
+    const uptr InUsePages =
+        AllocatedPagesCount - Recorder.getReleasedPagesCount();
+    const uptr InUseBytes = InUsePages * PageSize;
+
+    Str->append("  %02zu (%6zu): inuse/total blocks: %6zu/%6zu inuse/total "
+                "pages: %6zu/%6zu inuse bytes: %6zuK\n",
+                ClassId, BlockSize, InUseBlocks, TotalBlocks, InUsePages,
+                AllocatedPagesCount, InUseBytes >> 10);
   }
 
   NOINLINE uptr releaseToOSMaybe(SizeClassInfo *Sci, uptr ClassId,
                                  ReleaseToOS ReleaseType = ReleaseToOS::Normal)
       REQUIRES(Sci->Mutex) {
     const uptr BlockSize = getSizeByClassId(ClassId);
-    const uptr PageSize = getPageSizeCached();
 
     DCHECK_GE(Sci->FreeListInfo.PoppedBlocks, Sci->FreeListInfo.PushedBlocks);
     const uptr BytesInFreeList =
@@ -861,6 +927,60 @@ private:
 
     if (UNLIKELY(BytesInFreeList == 0))
       return 0;
+
+    // ====================================================================== //
+    // 1. Check if we have enough free blocks and if it's worth doing a page
+    // release.
+    // ====================================================================== //
+    if (ReleaseType != ReleaseToOS::ForceAll &&
+        !hasChanceToReleasePages(Sci, BlockSize, BytesInFreeList,
+                                 ReleaseType)) {
+      return 0;
+    }
+
+    const uptr First = Sci->MinRegionIndex;
+    const uptr Last = Sci->MaxRegionIndex;
+    DCHECK_NE(Last, 0U);
+    DCHECK_LE(First, Last);
+    uptr TotalReleasedBytes = 0;
+    const uptr Base = First * RegionSize;
+    const uptr NumberOfRegions = Last - First + 1U;
+
+    // ==================================================================== //
+    // 2. Mark the free blocks and we can tell which pages are in-use by
+    //    querying `PageReleaseContext`.
+    // ==================================================================== //
+    PageReleaseContext Context = markFreeBlocks(Sci, ClassId, BlockSize, Base,
+                                                NumberOfRegions, ReleaseType);
+    if (!Context.hasBlockMarked())
+      return 0;
+
+    // ==================================================================== //
+    // 3. Release the unused physical pages back to the OS.
+    // ==================================================================== //
+    ReleaseRecorder Recorder(Base);
+    auto SkipRegion = [this, First, ClassId](uptr RegionIndex) {
+      ScopedLock L(ByteMapMutex);
+      return (PossibleRegions[First + RegionIndex] - 1U) != ClassId;
+    };
+    releaseFreeMemoryToOS(Context, Recorder, SkipRegion);
+
+    if (Recorder.getReleasedRangesCount() > 0) {
+      Sci->ReleaseInfo.BytesInFreeListAtLastCheckpoint = BytesInFreeList;
+      Sci->ReleaseInfo.RangesReleased += Recorder.getReleasedRangesCount();
+      Sci->ReleaseInfo.LastReleasedBytes = Recorder.getReleasedBytes();
+      TotalReleasedBytes += Sci->ReleaseInfo.LastReleasedBytes;
+    }
+    Sci->ReleaseInfo.LastReleaseAtNs = getMonotonicTimeFast();
+
+    return TotalReleasedBytes;
+  }
+
+  bool hasChanceToReleasePages(SizeClassInfo *Sci, uptr BlockSize,
+                               uptr BytesInFreeList, ReleaseToOS ReleaseType)
+      REQUIRES(Sci->Mutex) {
+    DCHECK_GE(Sci->FreeListInfo.PoppedBlocks, Sci->FreeListInfo.PushedBlocks);
+    const uptr PageSize = getPageSizeCached();
 
     if (BytesInFreeList <= Sci->ReleaseInfo.BytesInFreeListAtLastCheckpoint)
       Sci->ReleaseInfo.BytesInFreeListAtLastCheckpoint = BytesInFreeList;
@@ -883,22 +1003,20 @@ private:
     // (BytesInFreeListAtLastCheckpoint - BytesInFreeList).
     const uptr PushedBytesDelta =
         BytesInFreeList - Sci->ReleaseInfo.BytesInFreeListAtLastCheckpoint;
-    if (PushedBytesDelta < PageSize && ReleaseType != ReleaseToOS::ForceAll)
-      return 0;
+    if (PushedBytesDelta < PageSize)
+      return false;
 
-    const bool CheckDensity =
-        isSmallBlock(BlockSize) && ReleaseType != ReleaseToOS::ForceAll;
     // Releasing smaller blocks is expensive, so we want to make sure that a
     // significant amount of bytes are free, and that there has been a good
     // amount of batches pushed to the freelist before attempting to release.
-    if (CheckDensity && ReleaseType == ReleaseToOS::Normal)
+    if (isSmallBlock(BlockSize) && ReleaseType == ReleaseToOS::Normal)
       if (PushedBytesDelta < Sci->AllocatedUser / 16U)
-        return 0;
+        return false;
 
     if (ReleaseType == ReleaseToOS::Normal) {
       const s32 IntervalMs = atomic_load_relaxed(&ReleaseToOsIntervalMs);
       if (IntervalMs < 0)
-        return 0;
+        return false;
 
       // The constant 8 here is selected from profiling some apps and the number
       // of unreleased pages in the large size classes is around 16 pages or
@@ -911,23 +1029,24 @@ private:
                 static_cast<u64>(IntervalMs) * 1000000 >
             getMonotonicTimeFast()) {
           // Memory was returned recently.
-          return 0;
+          return false;
         }
       }
     } // if (ReleaseType == ReleaseToOS::Normal)
 
-    const uptr First = Sci->MinRegionIndex;
-    const uptr Last = Sci->MaxRegionIndex;
-    DCHECK_NE(Last, 0U);
-    DCHECK_LE(First, Last);
-    uptr TotalReleasedBytes = 0;
-    const uptr Base = First * RegionSize;
-    const uptr NumberOfRegions = Last - First + 1U;
-    const uptr GroupSize = (1U << GroupSizeLog);
+    return true;
+  }
+
+  PageReleaseContext markFreeBlocks(SizeClassInfo *Sci, const uptr ClassId,
+                                    const uptr BlockSize, const uptr Base,
+                                    const uptr NumberOfRegions,
+                                    ReleaseToOS ReleaseType)
+      REQUIRES(Sci->Mutex) {
+    const uptr PageSize = getPageSizeCached();
+    const uptr GroupSize = (1UL << GroupSizeLog);
     const uptr CurGroupBase =
         compactPtrGroupBase(compactPtr(ClassId, Sci->CurrentRegion));
 
-    ReleaseRecorder Recorder(Base);
     PageReleaseContext Context(BlockSize, NumberOfRegions,
                                /*ReleaseSize=*/RegionSize);
 
@@ -951,25 +1070,27 @@ private:
                              BG.Batches.front()->getCount();
       const uptr BytesInBG = NumBlocks * BlockSize;
 
-      if (ReleaseType != ReleaseToOS::ForceAll &&
-          BytesInBG <= BG.BytesInBGAtLastCheckpoint) {
-        BG.BytesInBGAtLastCheckpoint = BytesInBG;
-        continue;
-      }
-      const uptr PushedBytesDelta = BytesInBG - BG.BytesInBGAtLastCheckpoint;
-      if (ReleaseType != ReleaseToOS::ForceAll && PushedBytesDelta < PageSize)
-        continue;
+      if (ReleaseType != ReleaseToOS::ForceAll) {
+        if (BytesInBG <= BG.BytesInBGAtLastCheckpoint) {
+          BG.BytesInBGAtLastCheckpoint = BytesInBG;
+          continue;
+        }
 
-      // Given the randomness property, we try to release the pages only if the
-      // bytes used by free blocks exceed certain proportion of allocated
-      // spaces.
-      if (CheckDensity && (BytesInBG * 100U) / AllocatedGroupSize <
-                              (100U - 1U - BlockSize / 16U)) {
-        continue;
+        const uptr PushedBytesDelta = BytesInBG - BG.BytesInBGAtLastCheckpoint;
+        if (PushedBytesDelta < PageSize)
+          continue;
+
+        // Given the randomness property, we try to release the pages only if
+        // the bytes used by free blocks exceed certain proportion of allocated
+        // spaces.
+        if (isSmallBlock(BlockSize) && (BytesInBG * 100U) / AllocatedGroupSize <
+                                           (100U - 1U - BlockSize / 16U)) {
+          continue;
+        }
       }
 
       // TODO: Consider updating this after page release if `ReleaseRecorder`
-      // can tell the releasd bytes in each group.
+      // can tell the released bytes in each group.
       BG.BytesInBGAtLastCheckpoint = BytesInBG;
 
       const uptr MaxContainedBlocks = AllocatedGroupSize / BlockSize;
@@ -997,27 +1118,10 @@ private:
       // We may not be able to do the page release In a rare case that we may
       // fail on PageMap allocation.
       if (UNLIKELY(!Context.hasBlockMarked()))
-        return 0;
+        break;
     }
 
-    if (!Context.hasBlockMarked())
-      return 0;
-
-    auto SkipRegion = [this, First, ClassId](uptr RegionIndex) {
-      ScopedLock L(ByteMapMutex);
-      return (PossibleRegions[First + RegionIndex] - 1U) != ClassId;
-    };
-    releaseFreeMemoryToOS(Context, Recorder, SkipRegion);
-
-    if (Recorder.getReleasedRangesCount() > 0) {
-      Sci->ReleaseInfo.BytesInFreeListAtLastCheckpoint = BytesInFreeList;
-      Sci->ReleaseInfo.RangesReleased += Recorder.getReleasedRangesCount();
-      Sci->ReleaseInfo.LastReleasedBytes = Recorder.getReleasedBytes();
-      TotalReleasedBytes += Sci->ReleaseInfo.LastReleasedBytes;
-    }
-    Sci->ReleaseInfo.LastReleaseAtNs = getMonotonicTimeFast();
-
-    return TotalReleasedBytes;
+    return Context;
   }
 
   SizeClassInfo SizeClassInfoArray[NumClasses] = {};
